@@ -106,9 +106,9 @@ public final class MockWebServer {
   private final BlockingQueue<RecordedRequest> requestQueue = new LinkedBlockingQueue<>();
 
   private final Set<Socket> openClientSockets =
-      Collections.newSetFromMap(new ConcurrentHashMap<Socket, Boolean>());
+      compat.Collections.newSetFromMap(new ConcurrentHashMap<Socket, Boolean>());
   private final Set<SpdyConnection> openSpdyConnections =
-      Collections.newSetFromMap(new ConcurrentHashMap<SpdyConnection, Boolean>());
+      compat.Collections.newSetFromMap(new ConcurrentHashMap<SpdyConnection, Boolean>());
   private final AtomicInteger requestCount = new AtomicInteger();
   private long bodyLimit = Long.MAX_VALUE;
   private ServerSocketFactory serverSocketFactory = ServerSocketFactory.getDefault();
@@ -314,10 +314,9 @@ public final class MockWebServer {
     if (executor != null) throw new IllegalStateException("start() already called");
     executor = Executors.newCachedThreadPool(Util.threadFactory("MockWebServer", false));
     this.inetSocketAddress = inetSocketAddress;
-    serverSocket = serverSocketFactory.createServerSocket();
+    serverSocket = serverSocketFactory.createServerSocket(inetSocketAddress.getPort(), 50);
     // Reuse if the user specified a port
     serverSocket.setReuseAddress(inetSocketAddress.getPort() != 0);
-    serverSocket.bind(inetSocketAddress, 50);
 
     port = serverSocket.getLocalPort();
     executor.execute(new NamedRunnable("MockWebServer %s", port) {
@@ -332,7 +331,18 @@ public final class MockWebServer {
         // Release all sockets and all threads, even if any close fails.
         Util.closeQuietly(serverSocket);
         for (Iterator<Socket> s = openClientSockets.iterator(); s.hasNext(); ) {
-          Util.closeQuietly(s.next());
+          Socket so = s.next();
+          // workaround for bug in Android 2.1
+          // (https://code.google.com/p/android/issues/detail?id=6144)
+          // Cause inputStream.read() to break out
+          try {
+            if (!so.isInputShutdown()) {
+              so.shutdownInput();
+            }
+          } catch (IOException e) {
+            e.printStackTrace();
+          }
+          Util.closeQuietly(so);
           s.remove();
         }
         for (Iterator<SpdyConnection> s = openSpdyConnections.iterator(); s.hasNext(); ) {
@@ -366,6 +376,20 @@ public final class MockWebServer {
 
   public void shutdown() throws IOException {
     if (serverSocket == null) throw new IllegalStateException("shutdown() before start()");
+
+    // workaround for bug in Android 2.1
+    // (https://code.google.com/p/android/issues/detail?id=6144)
+    // Cause inputStream.read() to break out
+    for (Iterator<Socket> it = openClientSockets.iterator(); it.hasNext(); ) {
+      Socket s = it.next();
+      try {
+        if (!s.isInputShutdown()) {
+          s.shutdownInput();
+        }
+      } catch (IOException e) {
+        e.printStackTrace();
+      }
+    }
 
     // Cause acceptConnections() to break out.
     serverSocket.close();
@@ -643,10 +667,10 @@ public final class MockWebServer {
     final CountDownLatch connectionClose = new CountDownLatch(1);
 
     ThreadPoolExecutor replyExecutor =
-        new ThreadPoolExecutor(1, 1, 1, SECONDS, new LinkedBlockingDeque<Runnable>(),
+        new ThreadPoolExecutor(1, 1, 1, SECONDS, new compat.LinkedBlockingDeque<Runnable>(),
             Util.threadFactory(String.format("MockWebServer %s WebSocket", request.getPath()),
                 true));
-    replyExecutor.allowCoreThreadTimeOut(true);
+    // replyExecutor.allowCoreThreadTimeOut(true);
     final RealWebSocket webSocket =
         new RealWebSocket(false /* is server */, source, sink, new SecureRandom(), replyExecutor,
             listener, request.getPath()) {
